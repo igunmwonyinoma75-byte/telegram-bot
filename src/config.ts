@@ -1075,6 +1075,55 @@ export function loadConfig(): BotConfig {
   return config;
 }
 
+/** Result of previewing where a notification of a given contract would be routed. */
+export interface RoutingPreview {
+  /** Contract whose events were previewed. */
+  contract: "market" | "squad";
+  /** Destinations that would receive the notification. */
+  matched: string[];
+  /** Destinations dropped by a feature flag or the category allowlist. */
+  filtered: string[];
+  /** Destinations with no usable chat id (empty or unconfigured). */
+  unavailable: string[];
+}
+
+/**
+ * Preview routing for a contract's notifications without any network I/O.
+ * Uses the same chat-id resolution as configured destinations so the preview
+ * matches live delivery targets. Pure: safe to call from `/status` or tests.
+ */
+export function previewRouting(
+  config: BotConfig,
+  contract: "market" | "squad",
+): RoutingPreview {
+  const preview: RoutingPreview = { contract, matched: [], filtered: [], unavailable: [] };
+
+  const enabled =
+    contract === "market" ? config.featureFlags.market : config.featureFlags.squad;
+  const candidate =
+    contract === "market"
+      ? config.marketChatId ?? config.chatId
+      : config.squadChatId ?? config.chatId;
+
+  const destinations = [candidate, ...(config.routes ?? []).map((r) => r.chatId)];
+  const seen = new Set<string>();
+  for (const destination of destinations) {
+    if (destination === undefined || destination === "") {
+      preview.unavailable.push(String(destination ?? ""));
+      continue;
+    }
+    if (seen.has(destination)) continue;
+    seen.add(destination);
+    if (!enabled) {
+      preview.filtered.push(destination);
+    } else {
+      preview.matched.push(destination);
+    }
+  }
+
+  return preview;
+}
+
 /** Check if a host is a loopback address (127.0.0.1, [::1], localhost). */
 function isLoopback(host: string): boolean {
   const normalized = host.toLowerCase();

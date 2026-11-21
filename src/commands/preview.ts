@@ -2,9 +2,14 @@
  * `/preview [market|squad]`: render a sample notification with the current
  * formatting and link-preview settings, so an operator can check a channel's
  * look without waiting for a live event.
+ *
+ * `/preview routes [market|squad]` (or `/preview routing ...`) reports the
+ * routing decision for a sample event without calling Telegram sendMessage.
+ * It goes through the same decision path as live delivery.
  */
 
 import { previewMessage } from "../notifications/format.js";
+import { previewRouting } from "../notifications/notifier.js";
 import { defineCommand } from "./registry.js";
 import { TELEGRAM_OPTIONS, commandArgument } from "./runtime.js";
 
@@ -12,7 +17,18 @@ export const previewCommand = defineCommand({
   command: "preview",
   chatAllowlist: true,
   handler: async (ctx, deps) => {
-    const target = commandArgument(ctx) || "market";
+    const argument = commandArgument(ctx);
+    const [first, ...rest] = argument.split(/\s+/).filter(Boolean);
+    if (first === "routes" || first === "routing") {
+      const target = rest[0] || "market";
+      const report = previewRouting(deps.config.name ?? String(deps.config), target);
+      const lines = Array.isArray((report as { lines?: string[] }).lines)
+        ? (report as { lines: string[] }).lines
+        : [JSON.stringify(report)];
+      await ctx.reply(lines.join("\n"), TELEGRAM_OPTIONS);
+      return;
+    }
+    const target = argument || "market";
     await ctx.reply(previewMessage(deps.config, target), TELEGRAM_OPTIONS);
   },
 });

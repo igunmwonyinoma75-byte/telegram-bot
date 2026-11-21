@@ -30,6 +30,7 @@ import {
   isOperator,
   operatorAllowed,
   registeredCommands,
+  validateCommandCatalogue,
   visibleCommandMetadata,
   type CommandDeps,
   type CommandModule,
@@ -88,6 +89,9 @@ export {
   updateOrReplyMessage,
   validateCallbackData,
   validatePauseConfirmData,
+  isCanonicalNumericId,
+  isNoncanonicalNumericId,
+  MAX_CANONICAL_NUMERIC_DIGITS,
   type CallbackActionType,
   type CallbackValidationResult,
   type ValidCallbackAction,
@@ -335,6 +339,7 @@ function registerUnknownCommandFallback(
 }
 
 export function createBot(deps: BotDeps): Bot {
+  validateCommandCatalogue();
   const clientOptions =
     deps.config.telegramApiRoot !== undefined && deps.config.telegramApiRoot !== null
       ? { client: { apiRoot: deps.config.telegramApiRoot } }

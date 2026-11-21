@@ -21,9 +21,38 @@
  *   const { close } = await metrics.startServer(9090);
  *   // on shutdown:
  *   await close();
+ *
+ * Pass a validation failure reason to `metrics.droppedSamples.inc("<reason>")`.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  DEFAULT_SERVICE_LEVEL_WINDOW_SIZE,
+  type ServiceLevelCompleteness,
+  type ServiceLevelDataGap,
+  type ServiceLevelDeliverySuccess,
+  type ServiceLevelIncompleteReason,
+  type ServiceLevelLag,
+  type ServiceLevelSample,
+  type ServiceLevelWindowOptions,
+  type ServiceLevelWindowReport,
+  ServiceLevelWindow,
+  formatServiceLevelWindow,
+} from "./stellar/metrics.js";
+
+export {
+  DEFAULT_SERVICE_LEVEL_WINDOW_SIZE,
+  type ServiceLevelCompleteness,
+  type ServiceLevelDataGap,
+  type ServiceLevelDeliverySuccess,
+  type ServiceLevelIncompleteReason,
+  type ServiceLevelLag,
+  type ServiceLevelSample,
+  type ServiceLevelWindowOptions,
+  type ServiceLevelWindowReport,
+  ServiceLevelWindow,
+  formatServiceLevelWindow,
+};
 
 // ── Metric types ──────────────────────────────────────────────────────────────
 
@@ -33,6 +62,25 @@ export interface Counter {
   /** Current value. */
   value(): number;
 }
+
+/**
+ * Bounded-cardinality counter keyed by a fixed set of reason labels.
+ * Unknown labels are folded into `unknown` so Prometheus cardinality stays bounded.
+ */
+export interface LabeledCounter {
+  /** Increment the counter for `reason` (default 1). Unknown reasons map to "unknown". */
+  inc(reason: string, delta?: number): void;
+  /** Current value for a reason label. */
+  value(reason: string): number;
+}
+
+/** Fixed set of reasons a metric sample can be dropped. Bounded for cardinality safety. */
+export const DROP_REASONS = [
+  "invalid_number",
+  "unknown_label",
+] as const;
+
+export type DropReason = (typeof DROP_REASONS)[number];
 
 export interface Gauge {
   /** Set to `value`. */
@@ -96,6 +144,13 @@ export interface MetricsRegistry {
   /** Complete cycles classified as a spike or drop against the rolling
    *  activity baseline. */
   activityAnomalies: Counter;
+  /**
+   * Samples dropped before exposure, labelled by bounded reason
+   * (`invalid_number`, `unknown_label`, or `unknown`).
+   */
+  droppedSamples: LabeledCounter;
+  /** Record a numeric sample for a gauge; non-finite values are dropped and counted. */
+  setGaugeSafe(gauge: Gauge, value: number): void;
   /** Total confirmed notifications with a known ledger close time (includes 0ms lag). */
   notificationAgeSamples: Counter;
   /** Total confirmed notifications whose event lacked a valid ledger close time. */
@@ -114,6 +169,29 @@ export interface MetricsRegistry {
    * (`notificationAgeSamples` incremented with `0` ms).
    */
   recordNotificationAge(ageMs: number | null): void;
+
+  /** Bounded rolling service-level window tracker. */
+  serviceLevel: ServiceLevelWindow;
+
+  /**
+   * Generate the machine-readable service-level window report from bounded local samples.
+   */
+  serviceLevelReport(): ServiceLevelWindowReport;
+
+  /**
+   * Record a delivery attempt into the service-level window.
+   */
+  recordDelivery(
+    success: boolean,
+    ageMs?: number | null,
+    dataGap?: boolean,
+    gapReason?: ServiceLevelIncompleteReason,
+  ): void;
+
+  /**
+   * Record a data gap event into the service-level window.
+   */
+  recordDataGap(reason?: ServiceLevelIncompleteReason): void;
 
   /**
    * Render the registry as a Prometheus text exposition string.
@@ -171,7 +249,36 @@ function makeGauge(name: string, help: string): Gauge & { _name: string; _help: 
 
 const METRICS_PREFIX = "mimir_bot_";
 
-export function createMetrics(): MetricsRegistry {
+function makeLabeledCounter(name: string, help: string, labels: readonly string[]): LabeledCounter & { _name: string; _help: string; _labels: readonly string[]; _entries(): [string, number][] } {
+  const values = new Map<string, number>(labels.map((l) => [l, 0]));
+  const known = new Set<string>(labels);
+  return {
+    _name: name,
+    _help: help,
+    _labels: labels,
+    inc(reason: string, delta = 1): void {
+      if (delta < 0) throw new RangeError(`LabeledCounter.inc delta must be >= 0; got ${delta}`);
+      const key = known.has(reason) ? reason : "unknown";
+      values.set(key, (values.get(key) ?? 0) + delta);
+    },
+    value(reason: string): number {
+      return values.get(known.has(reason) ? reason : "unknown") ?? 0;
+    },
+    _entries(): [string, number][] {
+      return [...values.entries()];
+    },
+  };
+}
+
+export interface MetricsOptions {
+  /** Optional capacity of the bounded rolling service-level window. */
+  serviceLevelWindowSize?: number | undefined;
+}
+
+export function createMetrics(options?: MetricsOptions): MetricsRegistry {
+  const serviceLevel = new ServiceLevelWindow({
+    windowSize: options?.serviceLevelWindowSize,
+  });
   const pollCycles = makeCounter(
     `${METRICS_PREFIX}poll_cycles_total`,
     "Total number of poll cycles started.",
@@ -232,6 +339,11 @@ export function createMetrics(): MetricsRegistry {
     `${METRICS_PREFIX}activity_anomalies_total`,
     "Complete poll cycles classified as a spike or drop against the rolling activity baseline.",
   );
+  const droppedSamples = makeLabeledCounter(
+    `${METRICS_PREFIX}dropped_samples_total`,
+    "Metric samples dropped before exposure, by bounded reason.",
+    [...DROP_REASONS, "unknown"],
+  );
   const notificationAgeSamples = makeCounter(
     `${METRICS_PREFIX}notification_age_samples_total`,
     "Total confirmed notifications with a known ledger close time (includes 0ms lag).",
@@ -278,9 +390,26 @@ export function createMetrics(): MetricsRegistry {
     maxNotificationAgeMs,
   ];
 
+  const baseFailedInc = notificationsFailed.inc;
+  notificationsFailed.inc = (delta = 1) => {
+    baseFailedInc(delta);
+    for (let i = 0; i < delta; i += 1) {
+      serviceLevel.recordDelivery(false, null);
+    }
+  };
+
+  const baseStaleCursorInc = staleCursorEvents.inc;
+  staleCursorEvents.inc = (delta = 1) => {
+    baseStaleCursorInc(delta);
+    for (let i = 0; i < delta; i += 1) {
+      serviceLevel.recordDataGap("stale_cursor");
+    }
+  };
+
   function recordNotificationAge(ageMs: number | null): void {
     if (ageMs === null || typeof ageMs !== "number" || !Number.isFinite(ageMs)) {
       notificationAgeMissingLedgerTime.inc();
+      serviceLevel.recordDelivery(true, null, true, "missing_ledger_time");
       return;
     }
     const clampedMs = Math.max(0, Math.round(ageMs));
@@ -290,6 +419,7 @@ export function createMetrics(): MetricsRegistry {
     if (clampedMs > maxNotificationAgeMs.value()) {
       maxNotificationAgeMs.set(clampedMs);
     }
+    serviceLevel.recordDelivery(true, clampedMs, false);
   }
 
   function render(): string {
@@ -299,6 +429,12 @@ export function createMetrics(): MetricsRegistry {
       lines.push(`# HELP ${c._name} ${c._help}`);
       lines.push(`# TYPE ${c._name} counter`);
       lines.push(`${c._name} ${c.value()}`);
+    }
+
+    lines.push(`# HELP ${droppedSamples._name} ${droppedSamples._help}`);
+    lines.push(`# TYPE ${droppedSamples._name} counter`);
+    for (const [reason, v] of droppedSamples._entries()) {
+      lines.push(`${droppedSamples._name}{reason="${reason}"} ${v}`);
     }
 
     for (const g of gauges) {
@@ -347,6 +483,18 @@ export function createMetrics(): MetricsRegistry {
         "Cache-Control": "no-store",
       });
       res.end("OK\n");
+      return;
+    }
+
+    if (path === "/service-level") {
+      const report = serviceLevel.report();
+      const body = JSON.stringify(report, null, 2) + "\n";
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": Buffer.byteLength(body),
+        "Cache-Control": "no-store",
+      });
+      res.end(body);
       return;
     }
 
@@ -402,12 +550,35 @@ export function createMetrics(): MetricsRegistry {
     lastCycleEvents,
     activityBaselineEvents,
     activityAnomalies,
+    droppedSamples,
+    setGaugeSafe(gauge: Gauge, value: number): void {
+      if (!Number.isFinite(value)) {
+        droppedSamples.inc("invalid_number");
+        return;
+      }
+      gauge.set(value);
+    },
     notificationAgeSamples,
     notificationAgeMissingLedgerTime,
     notificationAgeTotalMs,
     lastNotificationAgeMs,
     maxNotificationAgeMs,
     recordNotificationAge,
+    serviceLevel,
+    serviceLevelReport(): ServiceLevelWindowReport {
+      return serviceLevel.report();
+    },
+    recordDelivery(
+      success: boolean,
+      ageMs?: number | null,
+      dataGap?: boolean,
+      gapReason?: ServiceLevelIncompleteReason,
+    ): void {
+      serviceLevel.recordDelivery(success, ageMs, dataGap, gapReason);
+    },
+    recordDataGap(reason?: ServiceLevelIncompleteReason): void {
+      serviceLevel.recordDataGap(reason);
+    },
     render,
     startServer,
   };

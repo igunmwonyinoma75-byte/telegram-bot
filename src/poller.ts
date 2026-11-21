@@ -910,6 +910,82 @@ export function cursorQuarantinePath(cursorFile: string, at: Date = new Date()):
   return `${cursorFile}.corrupt.${stamp}`;
 }
 
+/**
+ * Read-only preview of where a cursor recovery would move one target.
+ *
+ * Built only from state the poller already holds (the persisted cursor and the
+ * last retained window it observed). It performs no RPC call and no chain
+ * write, so it is safe to show an operator before they act.
+ */
+export interface CursorRecoveryPreview {
+  source: ContractSource;
+  /** Current persisted position, or `null` when none is held. */
+  oldCursorLedger: number | null;
+  /** Ledger the next scan would resume from if recovery ran now. */
+  proposedLedger: number | null;
+  /** Oldest ledger the RPC was last observed to retain. */
+  retainedFloor: number | null;
+  /** Newest ledger the RPC was last observed to hold. */
+  retainedTip: number | null;
+  /** Estimated unrecoverable ledger range `[from, to)`, or `null` when none. */
+  missedRange: { from: number; to: number } | null;
+  verdict: CursorWindowVerdict["status"];
+}
+
+export function previewCursorRecovery(
+  source: ContractSource,
+  cursor: string | null,
+  window: { oldestLedger: number | null; latestLedger: number | null },
+): CursorRecoveryPreview {
+  const verdict = classifyCursorWindow(cursor, window.oldestLedger);
+  const oldCursorLedger =
+    cursor === null ? null : eventCursorLedger(cursor);
+  const retainedFloor = window.oldestLedger;
+  const retainedTip = window.latestLedger;
+
+  if (verdict.status === "stale") {
+    return {
+      source,
+      oldCursorLedger,
+      proposedLedger: retainedFloor,
+      retainedFloor,
+      retainedTip,
+      missedRange: { from: verdict.cursorLedger, to: verdict.cursorLedger + verdict.missedLedgers },
+      verdict: verdict.status,
+    };
+  }
+
+  return {
+    source,
+    oldCursorLedger,
+    proposedLedger: oldCursorLedger,
+    retainedFloor,
+    retainedTip,
+    missedRange: null,
+    verdict: verdict.status,
+  };
+}
+
+/** Human-readable, bounded preview for the cursor CLI. Never prints raw tokens. */
+export function formatCursorRecoveryPreview(preview: CursorRecoveryPreview): string {
+  const fmt = (n: number | null): string => (n === null ? "unknown" : String(n));
+  const lines = [
+    `[cursor-preview] ${preview.source}: ${preview.verdict}`,
+    `  old position:   ledger ${fmt(preview.oldCursorLedger)}`,
+    `  proposed:       ledger ${fmt(preview.proposedLedger)}`,
+    `  retained window: ${fmt(preview.retainedFloor)}..${fmt(preview.retainedTip)}`,
+  ];
+  if (preview.missedRange !== null) {
+    lines.push(
+      `  estimated missed ledger range: ${preview.missedRange.from}..${preview.missedRange.to} (not recoverable)`,
+    );
+  } else {
+    lines.push("  estimated missed ledger range: none");
+  }
+  lines.push("  no changes were made (preview only)");
+  return lines.join("\n");
+}
+
 function isNullOrString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }

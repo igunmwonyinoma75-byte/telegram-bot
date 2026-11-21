@@ -11,6 +11,7 @@ Operational reference describing all on-disk state files maintained by the Mimir
 | **Cursor Quarantine Copy** | None (derived from cursor file) | `./data/cursor.json.corrupt.<timestamp>` | `src/poller.ts` | Atomic rename of the live corrupt cursor file | Safe to delete once post-incident forensics and diagnosis are complete. Not loaded by runtime. | N/A (forensic artifact preserved for investigation; runtime ignores quarantine files). |
 | **Dead-Letter Queue File** | `DEAD_LETTER_FILE` | `./data/dead-letter.json` | `src/deadLetter.ts` | Atomic (write temporary file `${DEAD_LETTER_FILE}.tmp` then rename) | Treated as empty queue on boot. If deleted while running, re-created on the next failed send enqueue or persist. Unsent parked messages previously queued are lost unless recovered from backups. | Logged with a warning (`[dead-letter] unreadable queue... starting empty`). Queue initializes empty in memory; subsequent persists overwrite with valid state. |
 | **Audit Trail File** | `AUDIT_FILE` | `./data/audit.jsonl` | `src/audit.ts` | Append (`appendFile` with JSON line per entry) | If absent, automatically created on next append. Historical audit records prior to deletion are lost. | `/audit` skips unreadable/malformed lines (`unreadableLines` count incremented) and processes valid lines. poller append operations continue appending new entries. |
+| **Archive Manifest File** | `ARCHIVE_MANIFEST_FILE` | `./data/archive.manifest.json` | `src/stellar/archive.ts` | Atomic (write temporary file `${ARCHIVE_MANIFEST_FILE}.tmp` then rename) | Archive verification reports the manifest as missing; exported archives without a manifest cannot be verified and must be re-exported. | Verification fails closed with a manifest-parse error; the corrupt manifest is never used to accept records. Re-export to regenerate. |
 | **Status Snapshot File** | `STATUS_FILE` | `./data/status.json` | `src/status.ts` | Atomic (write temporary file `${STATUS_FILE}.tmp` then rename) | Harmless to poller loop. Recreated atomically on the next poll cycle. CLI `--status` command will fail to find status until rewritten. | Overwritten atomically on the next poll cycle. External tools or CLI reading corrupt file before next cycle encounter parse errors. |
 | **Instance Lock File** | `INSTANCE_LOCK_FILE` | `./data/poller.lock` | `src/instanceLock.ts` | Exclusive file creation (`O_EXCL` / `wx` flag via `open`) | Poller will re-acquire lock on next startup if no other instance holds it. During runtime, removal removes concurrency protection against double instances. | Stale or unparseable lock payload (non-JSON, bad schema, or dead PID) is warned and automatically unlinked by next acquiring instance. |
 
@@ -52,14 +53,23 @@ Operational reference describing all on-disk state files maintained by the Mimir
 - **Deleted**: Missing file is automatically created upon next audit flush.
 - **Corrupt**: Reading via `readAuditFile` counts and skips corrupt lines without aborting. Appending continues normally.
 
-### 6. Status Snapshot File (`STATUS_FILE`)
+### 6. Archive Manifest File (`ARCHIVE_MANIFEST_FILE`)
+- **Writer Module**: [`src/stellar/archive.ts`](../src/stellar/archive.ts) (manifest writer and verifier)
+- **Default Path**: `./data/archive.manifest.json` (configured via `DEFAULTS.archiveManifestFile` in [`src/config.ts`](../src/config.ts))
+- **Write Pattern**: Atomic write-then-rename (`${file}.tmp` -> `${file}`) when an event archive is exported.
+- **Content**: A hash-chained manifest binding each ordered record (by SHA-256 chain link), the network passphrase, and the first/last ledger bounds of the archive to a single root digest.
+- **Verification**: Missing, reordered, or altered records cause verification to fail; the manifest is never trusted to accept records it does not cover.
+- **Deleted**: Archive verification reports the manifest as missing. Exported archives without a manifest cannot be verified and must be re-exported.
+- **Corrupt**: Verification fails closed with a manifest-parse error. Re-export to regenerate.
+
+### 7. Status Snapshot File (`STATUS_FILE`)
 - **Writer Module**: [`src/status.ts`](../src/status.ts) (`writeStatusFile`)
 - **Default Path**: `./data/status.json` (configured via `DEFAULTS.statusFile` in [`src/config.ts`](../src/config.ts))
 - **Write Pattern**: Atomic write-then-rename (`${file}.tmp` -> `${file}`) on each poll cycle.
 - **Deleted**: Recreated on next poll cycle.
 - **Corrupt**: Replaced atomically on next cycle write.
 
-### 7. Instance Lock File (`INSTANCE_LOCK_FILE`)
+### 8. Instance Lock File (`INSTANCE_LOCK_FILE`)
 - **Writer Module**: [`src/instanceLock.ts`](../src/instanceLock.ts) (`acquireInstanceLock`)
 - **Default Path**: `./data/poller.lock` (configured via `DEFAULTS.lockFile` in [`src/config.ts`](../src/config.ts))
 - **Write Pattern**: Exclusive file descriptor open (`open(lockFile, "wx")`).

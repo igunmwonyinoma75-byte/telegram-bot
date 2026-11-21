@@ -451,6 +451,6 @@ test("`cursor check` usage errors and the updated usage line", async () => {
 
     const usage = await runCli(["verify"], data.root);
     assert.equal(usage.code, 1);
-    assert.match(usage.stderr, /<backup\|restore\|history\|check>/);
+    assert.match(usage.stderr, /<backup\|restore\|history\|preview\|check>/);
   }, "mimir-cursor-check-");
 });

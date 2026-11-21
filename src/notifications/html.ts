@@ -18,12 +18,14 @@ import {
   type DecodedEvent,
 } from "../stellar/decode.js";
 import { confidenceIndicator } from "./confidence.js";
+import { sanitizeUserText } from "./sanitize.js";
 import {
   clip,
   clipUtf16,
   eventExplorerUrl,
   eventAllowedByCategory,
   safeErrorMessage,
+  isolateAmount,
   TELEGRAM_MAX_MESSAGE_LENGTH,
   utf16Length,
 } from "./format.js";
@@ -60,7 +62,7 @@ export function escapeHtmlAttr(url: string): string {
 }
 
 function usdcHtml(units: bigint): string {
-  return escapeHtml(`${formatUsdc(units)} USDC`);
+  return escapeHtml(isolateAmount(`${formatUsdc(units)} USDC`));
 }
 
 function whoHtml(address: string): string {
@@ -85,7 +87,7 @@ function headlineHtml(event: DecodedEvent): string | null {
     case "claim_created":
       return (
         `🆕 <b>New claim</b> #${escapeHtml(String(p.claimId))}\n` +
-        `Category: ${escapeHtml(clip(p.category))}\n` +
+        `Category: ${escapeHtml(clip(sanitizeUserText(p.category)))}\n` +
         `Creator: ${whoHtml(p.creator)}`
       );
 
@@ -97,7 +99,7 @@ function headlineHtml(event: DecodedEvent): string | null {
       );
 
     case "claim_resolved": {
-      const summaryPart = p.summary ? `\n<i>${escapeHtml(clip(p.summary))}</i>` : "";
+      const summaryPart = p.summary ? `\n<i>${escapeHtml(clip(sanitizeUserText(p.summary)))}</i>` : "";
       return (
         `⚖️ <b>Claim #${escapeHtml(String(p.claimId))} resolved</b> — winner: <b>${escapeHtml(winnerSideLabel(p.winnerSide))}</b>\n` +
         `Confidence: ${escapeHtml(confidenceIndicator(p.confidence))}` +
@@ -135,7 +137,7 @@ function headlineHtml(event: DecodedEvent): string | null {
     case "market_created":
       return (
         `🆕 <b>New squad market</b> #${escapeHtml(String(p.marketId))}\n` +
-        `${escapeHtml(clip(p.question))}\n` +
+        `${escapeHtml(clip(sanitizeUserText(p.question)))}\n` +
         `Captain: ${whoHtml(p.captain)} · fee ${escapeHtml(String(p.feeBps))} bps · deadline ${escapeHtml(new Date(p.deadline * 1000).toISOString())}`
       );
 

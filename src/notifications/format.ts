@@ -56,6 +56,27 @@ export {
 
 /** Telegram's MarkdownV2 reserved set. All of it must be escaped, everywhere. */
 const MDV2_RESERVED = /[_*[\]()~`>#+\-=|{}.!\\]/g;
+/**
+ * Unicode First-Strong-Isolate / Pop-Directional-Isolate.
+ *
+ * Wrapping an already-formatted amount in FSI…PDI keeps the digits
+ * and the "USDC" unit readable left-to-right regardless of the
+ * surrounding text direction, while leaving the string's bytes intact
+ * (the isolate is a Unicode control, not a markup change).
+ */
+const FSI = "\u2068";
+const PDI = "\u2069";
+
+/**
+ * Isolate a displayed amount from the surrounding text direction (#920).
+ *
+ * The exact numeric text is preserved; only the two invisible control
+ * characters FSI/PDI surround it. Use this on every user-visible amount.
+ */
+export function isolateAmount(text: string): string {
+  return `${FSI}${text}${PDI}`;
+}
+
 const MAX_EVENT_FIELD_LENGTH = 200;
 const MAX_TX_HASH_LENGTH = 128;
 
@@ -244,7 +265,7 @@ export function safeErrorMessage(error: unknown, secrets: readonly string[] = []
 }
 
 function usdc(units: bigint): string {
-  return escapeMd(`${formatUsdc(units)} USDC`);
+  return escapeMd(isolateAmount(`${formatUsdc(units)} USDC`));
 }
 
 function who(address: string): string {
@@ -657,6 +678,8 @@ export function formatEvent(
 const MAX_PLAIN_TEXT_LENGTH = 4000;
 
 function plainUsdc(units: bigint): string {
+  // Plaintext is not a Telegram renderer; the isolate belongs on the
+  // Markdown and HTML paths, where the client applies bidi layout.
   return `${formatUsdc(units)} USDC`;
 }
 

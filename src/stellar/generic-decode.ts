@@ -52,6 +52,8 @@ export interface GenericEventPayload {
   value: string;
   summary: string;
   reason?: string;
+  /** Distinguishes an unrecognized event name from a malformed known event. */
+  status?: "ok" | "unknown_event" | "malformed_event";
 }
 
 export interface GenericDecodedEvent {
@@ -72,6 +74,10 @@ export interface GenericDecodedEvent {
   valueSummary: string;
   summary: string;
   payload: GenericEventPayload;
+  /** Stable status code: `ok`, `unknown_event`, or `malformed_event`. */
+  status: "ok" | "unknown_event" | "malformed_event";
+  /** Human-readable reason when `status` is not `ok`. */
+  reason?: string;
 }
 
 // ── String Sanitization & Clipping ───────────────────────────────────────────
@@ -592,6 +598,30 @@ function extractEventName(firstTopic: unknown): string {
 }
 
 /**
+ * Classify the decoded event name.
+ *
+ * - `unknown_event`: the first topic is absent or does not yield a usable name.
+ * - `malformed_event`: the first topic looks like a known event name but the
+ *   payload could not be rendered (e.g. the value rendered as `malformed`).
+ * - `ok`: a usable event name was extracted and the payload rendered cleanly.
+ */
+function classifyEventStatus(
+  eventName: string,
+  value: string,
+): { status: "ok" | "unknown_event" | "malformed_event"; reason?: string } {
+  if (eventName === "unknown" || eventName === "") {
+    return { status: "unknown_event", reason: "unrecognized event name" };
+  }
+  if (eventName.startsWith("malformed")) {
+    return { status: "malformed_event", reason: "malformed known event name" };
+  }
+  if (value === "malformed" || value.startsWith("malformed:")) {
+    return { status: "malformed_event", reason: "malformed known event payload" };
+  }
+  return { status: "ok" };
+}
+
+/**
  * Decode any Soroban event into a bounded GenericDecodedEvent.
  *
  * Never throws on malformed XDR, null fields, or oversized payloads.
@@ -628,6 +658,7 @@ export function decodeGenericEvent(
   const topicSummary = topics.length > 0 ? topics.join(" | ") : "(none)";
   const valueSummary = value;
   const summary = `[${eventName}] ${topicSummary} => ${valueSummary}`;
+  const { status, reason } = classifyEventStatus(eventName, value);
 
   return {
     source,
@@ -646,12 +677,16 @@ export function decodeGenericEvent(
     topicSummary,
     valueSummary,
     summary,
+    status,
+    reason,
     payload: {
       name: "generic",
       eventName,
       topics,
       value,
       summary,
+      status,
+      reason,
     },
   };
 }

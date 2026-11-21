@@ -26,10 +26,6 @@ export const DEFAULT_MAX_PER_CHAT = 50;
 
 export const DEFAULT_MAX_TOTAL = 5000;
 
-// Minimal edit scoped to the file provided: the issue's callback-confirmation
-// persistence lives in src/callbacks.ts and src/commands/broadcast.ts, which
-// are not included here, so no changes are made to the subscription store.
-
 /** Version of the portable chat export format. */
 export const EXPORT_VERSION = 1;
 
@@ -375,4 +371,102 @@ export class FollowStore {
       refs: [...(data.follows[chatId] ?? [])],
     };
   }
+
+  /**
+   * Restore one chat's follows from a portable export.
+   *
+   * Chat-boundary enforcement: the export's `chatId` must equal the supplied
+   * `chatId`; importing a snapshot that belongs to a different chat is refused
+   * to prevent accidental cross-chat contamination.
+   *
+   * Quota enforcement: the ref count in the export must not exceed
+   * `maxPerChat`, and adding them must not push the store past `maxTotal`.
+   * Both checks are done atomically before writing, so a quota violation
+   * leaves the existing data unchanged.
+   *
+   * The import **replaces** the target chat's current follows with the
+   * snapshot's refs (a restore, not a merge). All other chats are untouched.
+   *
+   * @param chatId - The chat whose follows will be replaced.
+   * @param exported - A `ChatExport` returned by {@link exportChat}.
+   * @returns The number of refs restored.
+   */
+  importChat(chatId: string, exported: unknown): number {
+    if (typeof chatId !== "string" || chatId.length === 0) {
+      throw new FollowStoreError("chatId must be a non-empty string");
+    }
+
+    // ── Validate the export object ────────────────────────────────────────────
+    if (
+      exported === null ||
+      typeof exported !== "object" ||
+      Array.isArray(exported)
+    ) {
+      throw new FollowStoreError("exported data must be a plain object");
+    }
+    const exp = exported as Record<string, unknown>;
+
+    if (exp.version !== EXPORT_VERSION) {
+      throw new FollowStoreError(
+        `unsupported export version: ${String(exp.version)}; expected ${EXPORT_VERSION}`,
+      );
+    }
+
+    if (typeof exp.chatId !== "string" || exp.chatId.length === 0) {
+      throw new FollowStoreError("exported data is missing a valid chatId");
+    }
+
+    // ── Chat-boundary check ───────────────────────────────────────────────────
+    if (exp.chatId !== chatId) {
+      throw new FollowStoreError(
+        `export belongs to chat ${exp.chatId} but import target is chat ${chatId}; ` +
+          `importing across chat boundaries is not allowed`,
+      );
+    }
+
+    if (!Array.isArray(exp.refs)) {
+      throw new FollowStoreError("exported data is missing a refs array");
+    }
+
+    // Validate every ref before touching the store.
+    const refs: string[] = [];
+    for (const entry of exp.refs) {
+      if (typeof entry !== "string" || parseRef(entry) === null) {
+        throw new FollowStoreError(`exported data contains an invalid ref: ${String(entry)}`);
+      }
+      // Deduplicate silently — an export with accidental duplicates restores cleanly.
+      if (!refs.includes(entry)) {
+        refs.push(entry);
+      }
+    }
+
+    // ── Quota checks (atomic: fail before any write) ──────────────────────────
+    if (refs.length > this.maxPerChat) {
+      throw new FollowStoreError(
+        `import would exceed the per-chat follow limit (${refs.length} > ${this.maxPerChat})`,
+      );
+    }
+
+    const data = this.read();
+    const currentForChat = data.follows[chatId]?.length ?? 0;
+    const otherTotal = this.totalCount(data) - currentForChat;
+    if (otherTotal + refs.length > this.maxTotal) {
+      throw new FollowStoreError(
+        `import would exceed the total follow limit (${otherTotal + refs.length} > ${this.maxTotal})`,
+      );
+    }
+
+    // ── Atomic replace ────────────────────────────────────────────────────────
+    if (refs.length === 0) {
+      delete data.follows[chatId];
+    } else {
+      data.follows[chatId] = refs;
+    }
+    this.write(data);
+    return refs.length;
+  }
+}
+
+export function createFollowStore(options: FollowStoreOptions): FollowStore {
+  return new FollowStore(options);
 }

@@ -7,9 +7,9 @@
 
 import { randomUUID } from "node:crypto";
 import { access, link, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { config as loadDotenv } from "dotenv";
+import { pathToFileURL } from "node:url";
 
 import {
   checkCursorConsistency,
@@ -71,6 +71,50 @@ async function exists(filePath: string): Promise<boolean> {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
+  }
+}
+
+async function canonicalizePath(filePath: string): Promise<string> {
+  const resolved = path.resolve(filePath);
+  const normalizeCase = (value: string) =>
+    process.platform === "win32" ? value.toLowerCase() : value;
+
+  try {
+    return normalizeCase(await realpath(resolved));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  // If the leaf does not exist yet, resolve symlinks on the nearest existing ancestor.
+  const segments: string[] = [];
+  let current = resolved;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return normalizeCase(resolved);
+    }
+    segments.unshift(path.basename(current));
+    current = parent;
+    try {
+      const realParent = await realpath(current);
+      return normalizeCase(path.join(realParent, ...segments));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw err;
+      }
+    }
+  }
+}
+
+export async function assertDifferentPaths(left: string, right: string): Promise<void> {
+  const [canonicalLeft, canonicalRight] = await Promise.all([
+    canonicalizePath(left),
+    canonicalizePath(right),
+  ]);
+  if (canonicalLeft === canonicalRight) {
+    throw new Error("backup and live cursor paths must be different");
   }
 }
 
@@ -369,22 +413,13 @@ interface CliOptions {
   json: boolean;
 }
 
-const VALUE_OPTIONS = new Set([
-  "--file",
-  "--out",
-  "--from",
-  "--target",
-  "--to",
-  "--retained-start",
-  "--retained-end",
-  "--archive",
-  "--market-contract",
-  "--squad-contract",
-]);
-
 function parseOptions(args: string[]): CliOptions {
   const options: CliOptions = { force: false, json: false };
   const seen = new Set<string>();
+  const valued = new Set([
+    "--file", "--out", "--from", "--target", "--to", "--retained-start", "--retained-end",
+    "--archive", "--market-contract", "--squad-contract",
+  ]);
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] ?? "";
@@ -394,7 +429,7 @@ function parseOptions(args: string[]): CliOptions {
       options[arg.slice(2) as "force" | "json"] = true;
       continue;
     }
-    if (!VALUE_OPTIONS.has(arg)) {
+    if (!valued.has(arg)) {
       throw new Error(`unknown option: ${arg}`);
     }
     if (seen.has(arg)) throw new Error(`duplicate ${arg} option`);
@@ -422,63 +457,13 @@ function resolvePath(value: string): string {
   return path.resolve(process.cwd(), value);
 }
 
-async function canonicalizePath(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  const normalizeCase = (value: string) =>
-    process.platform === "win32" ? value.toLowerCase() : value;
-
-  try {
-    return normalizeCase(await realpath(resolved));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw err;
-    }
-  }
-
-  // If the leaf does not exist yet, resolve symlinks on the nearest existing ancestor.
-  const segments: string[] = [];
-  let current = resolved;
-  for (;;) {
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return normalizeCase(resolved);
-    }
-    segments.unshift(path.basename(current));
-    current = parent;
-    try {
-      const realParent = await realpath(current);
-      return normalizeCase(path.join(realParent, ...segments));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw err;
-      }
-    }
-  }
-}
-
-export async function assertDifferentPaths(left: string, right: string): Promise<void> {
-  const [canonicalLeft, canonicalRight] = await Promise.all([
-    canonicalizePath(left),
-    canonicalizePath(right),
-  ]);
-  if (canonicalLeft === canonicalRight) {
-    throw new Error("backup and live cursor paths must be different");
-  }
-}
-
 async function main(): Promise<void> {
   loadDotenv({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
   const [action, ...args] = process.argv.slice(2);
-  if (
-    action !== "backup" &&
-    action !== "restore" &&
-    action !== "history" &&
-    action !== "preview" &&
-    action !== "check"
-  ) {
+  if (action !== "backup" && action !== "restore" && action !== "history" && action !== "preview" && action !== "check") {
     throw new Error(
-      "usage: npm run cursor -- <backup|restore|history|preview|check> [--file PATH] [--out PATH|--from PATH] [--force] " +
-        "[--to LEDGER [--target NAME] [--retained-start N --retained-end N]] " +
+      "usage: npm run cursor -- <backup|restore|history|preview|check> [--file PATH] [--out PATH|--from PATH] " +
+        "[--to LEDGER] [--target NAME] [--retained-start LEDGER --retained-end LEDGER] [--force] " +
         "[--archive PATH [--json] [--market-contract ID] [--squad-contract ID]]",
     );
   }
@@ -502,20 +487,6 @@ async function main(): Promise<void> {
     if (!report.consistent) process.exitCode = 1;
     return;
   }
-  if (action === "preview") {
-    if (!options.to) throw new Error("preview requires --to LEDGER");
-    const preview = await previewRecovery({
-      cursorFile,
-      target: options.target,
-      proposedLedger: parseLedger(options.to, "--to"),
-      retainedWindowStart:
-        options.retainedStart === undefined ? undefined : parseLedger(options.retainedStart, "--retained-start"),
-      retainedWindowEnd:
-        options.retainedEnd === undefined ? undefined : parseLedger(options.retainedEnd, "--retained-end"),
-    });
-    console.log(formatRecoveryPreview(preview));
-    return;
-  }
   if (action === "history") {
     const history = await readCursorRecoveryHistory(cursorFile);
     console.log(`[cursor] recovery history (${history.length}) for ${cursorFile}`);
@@ -529,25 +500,35 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (action === "preview") {
+    if (!options.to) throw new Error("preview requires --to LEDGER");
+    const preview = await previewRecovery({
+      cursorFile,
+      proposedLedger: parseLedger(options.to, "--to"),
+      ...(options.target !== undefined ? { target: options.target } : {}),
+      ...(options.retainedStart !== undefined
+        ? { retainedWindowStart: parseLedger(options.retainedStart, "--retained-start") }
+        : {}),
+      ...(options.retainedEnd !== undefined
+        ? { retainedWindowEnd: parseLedger(options.retainedEnd, "--retained-end") }
+        : {}),
+    });
+    console.log(formatRecoveryPreview(preview));
+    return;
+  }
+
   if (action === "backup") {
     const backupFile = resolvePath(
       options.out ?? `${cursorFile}.${new Date().toISOString().replace(/[:.]/g, "-")}.bak`,
     );
-    await assertDifferentPaths(cursorFile, backupFile);
     await backupCursor({ cursorFile, backupFile, force: options.force });
     return;
   }
 
   if (!options.from) throw new Error("restore requires --from PATH");
   const backupFile = resolvePath(options.from);
-  await assertDifferentPaths(cursorFile, backupFile);
   const lockFile = resolvePath(process.env.INSTANCE_LOCK_FILE ?? "./data/poller.lock");
-  await restoreCursor({
-    cursorFile,
-    backupFile,
-    lockFile,
-    force: options.force,
-  });
+  await restoreCursor({ cursorFile, backupFile, lockFile, force: options.force });
 }
 
 const invokedPath = process.argv[1];

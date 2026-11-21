@@ -9,7 +9,7 @@
  */
 
 import { previewMessage } from "../notifications/format.js";
-import { previewRouting } from "../notifications/notifier.js";
+import { previewRouting } from "../config.js";
 import { defineCommand } from "./registry.js";
 import { TELEGRAM_OPTIONS, commandArgument } from "./runtime.js";
 
@@ -20,11 +20,14 @@ export const previewCommand = defineCommand({
     const argument = commandArgument(ctx);
     const [first, ...rest] = argument.split(/\s+/).filter(Boolean);
     if (first === "routes" || first === "routing") {
-      const target = rest[0] || "market";
-      const report = previewRouting(deps.config.name ?? String(deps.config), target);
-      const lines = Array.isArray((report as { lines?: string[] }).lines)
-        ? (report as { lines: string[] }).lines
-        : [JSON.stringify(report)];
+      const target = rest[0] === "squad" ? "squad" : "market";
+      const report = previewRouting(deps.config, target);
+      const lines = [
+        `Routing preview (${report.contract}), nothing sent:`,
+        `matched: ${report.matched.join(", ") || "none"}`,
+        `filtered: ${report.filtered.join(", ") || "none"}`,
+        `unavailable: ${report.unavailable.length}`,
+      ];
       await ctx.reply(lines.join("\n"), TELEGRAM_OPTIONS);
       return;
     }

@@ -24,6 +24,7 @@ The `.env.example` file contains the base configuration. The bot uses strict env
 ### Network Settings
 - `STELLAR_RPC_URL`: The Soroban RPC endpoint used to poll for events. (e.g., `https://soroban-testnet.stellar.org`).
 - `STELLAR_HORIZON_URL`: Used for generating transaction links.
+- `STELLAR_EXPLORER_BASE_URL`: Explorer origin for transaction links (default `https://stellar.expert/explorer`). Only `https:` origins become clickable links in notifications; see [notification-links.md](notification-links.md).
 - `STELLAR_NETWORK_PASSPHRASE`: Must match the RPC network's passphrase.
 
 ### Poller Tuning & Safeguards

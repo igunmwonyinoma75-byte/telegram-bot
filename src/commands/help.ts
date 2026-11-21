@@ -26,8 +26,6 @@ export function helpMessage(config?: BotConfig): string {
     ...visibleCommandMetadata(config).map(({ command, description }) =>
       escapeMd(`/${command} — ${description}`),
     ),
-    "",
-    escapeMd("Market follows: /follow <market>, /unfollow <market>, /following."),,
   ].join("\n");
 }
 

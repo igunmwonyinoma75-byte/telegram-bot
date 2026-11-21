@@ -149,6 +149,8 @@ export interface MetricsRegistry {
    * (`invalid_number`, `unknown_label`, or `unknown`).
    */
   droppedSamples: LabeledCounter;
+  /** Count one dropped sample under a bounded reason (unknown reasons fold into `unknown`). */
+  recordDropped(reason: string): void;
   /** Record a numeric sample for a gauge; non-finite values are dropped and counted. */
   setGaugeSafe(gauge: Gauge, value: number): void;
   /** Total confirmed notifications with a known ledger close time (includes 0ms lag). */
@@ -233,12 +235,20 @@ function makeCounter(name: string, help: string): Counter & { _name: string; _he
   };
 }
 
-function makeGauge(name: string, help: string): Gauge & { _name: string; _help: string } {
+function makeFiniteGauge(
+  name: string,
+  help: string,
+  onDrop: (reason: DropReason) => void,
+): Gauge & { _name: string; _help: string } {
   let _value = 0;
   return {
     _name: name,
     _help: help,
     set(value: number): void {
+      if (!Number.isFinite(value)) {
+        onDrop("invalid_number");
+        return;
+      }
       _value = value;
     },
     value(): number {
@@ -276,6 +286,14 @@ export interface MetricsOptions {
 }
 
 export function createMetrics(options?: MetricsOptions): MetricsRegistry {
+  const droppedSamples = makeLabeledCounter(
+    `${METRICS_PREFIX}dropped_samples_total`,
+    "Metric samples dropped before exposure, by bounded reason.",
+    [...DROP_REASONS, "unknown"],
+  );
+  // Every gauge drops (and counts) non-finite samples instead of exposing them.
+  const makeGauge = (name: string, help: string) =>
+    makeFiniteGauge(name, help, (reason) => droppedSamples.inc(reason));
   const serviceLevel = new ServiceLevelWindow({
     windowSize: options?.serviceLevelWindowSize,
   });
@@ -338,11 +356,6 @@ export function createMetrics(options?: MetricsOptions): MetricsRegistry {
   const activityAnomalies = makeCounter(
     `${METRICS_PREFIX}activity_anomalies_total`,
     "Complete poll cycles classified as a spike or drop against the rolling activity baseline.",
-  );
-  const droppedSamples = makeLabeledCounter(
-    `${METRICS_PREFIX}dropped_samples_total`,
-    "Metric samples dropped before exposure, by bounded reason.",
-    [...DROP_REASONS, "unknown"],
   );
   const notificationAgeSamples = makeCounter(
     `${METRICS_PREFIX}notification_age_samples_total`,
@@ -551,6 +564,9 @@ export function createMetrics(options?: MetricsOptions): MetricsRegistry {
     activityBaselineEvents,
     activityAnomalies,
     droppedSamples,
+    recordDropped(reason: string): void {
+      droppedSamples.inc(reason);
+    },
     setGaugeSafe(gauge: Gauge, value: number): void {
       if (!Number.isFinite(value)) {
         droppedSamples.inc("invalid_number");

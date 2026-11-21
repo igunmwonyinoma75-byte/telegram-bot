@@ -15,12 +15,8 @@
 | `/categories` | Observed claim categories and counts | No | Yes |
 | `/pause` | Operator only: pause new scans | Yes | No |
 | `/resume` | Operator only: resume polling now | Yes | No |
-| `/follow` | Follow a market (`/follow market:<id>`) | No | No |
-| `/unfollow` | Stop following a market (`/unfollow market:<id>`) | No | No |
-| `/following` | List markets this chat follows | No | No |
 
 ## Access Controls
 
 - **Operator-only**: Requires `OPERATOR_TELEGRAM_USER_ID` to be configured. Only the designated operator can execute these commands.
 - **Allowlist-gated**: Restricted to chats listed in `ALLOWED_CHAT_IDS`. If `ALLOWED_CHAT_IDS` is unset or empty, these commands are open to any chat.
-- **Follows**: Subscriptions are isolated per chat and bounded by the follow store's per-chat and total quotas. Follow commands are read-only with respect to the chain.

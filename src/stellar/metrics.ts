@@ -156,11 +156,18 @@ export class RpcTiming {
 /** One-line, secret-free timing string for logs and the scan summary. */
 export function formatRpcTiming(summary: RpcTimingSummary): string {
   const { requests, failures, totalMs, avgMs, maxMs, operations, droppedSamples } = summary;
+  // Drop counters are appended only when a sample was actually dropped, so the
+  // common line stays unchanged and operators still see any clamping.
+  const drops = droppedSamples ?? { non_finite: 0, negative: 0 };
+  const dropSuffix =
+    drops.non_finite > 0 || drops.negative > 0
+      ? ` dropped_non_finite=${drops.non_finite} dropped_negative=${drops.negative}`
+      : "";
   return (
     `rpc requests=${requests} failures=${failures} total=${totalMs}ms ` +
     `avg=${avgMs}ms max=${maxMs}ms ` +
-    `health=${operations.health.requests} events=${operations.events.requests} ` +
-    `dropped_non_finite=${droppedSamples.non_finite} dropped_negative=${droppedSamples.negative}`
+    `health=${operations.health.requests} events=${operations.events.requests}` +
+    dropSuffix
   );
 }
 

@@ -685,6 +685,8 @@ endpoint, and `STELLAR_NETWORK_PASSPHRASE` controls network labeling for
 explorer links. The client sends no signing material and creates no wallet.
 Explorer path components are URL-encoded; custom `STELLAR_EXPLORER_BASE_URL`
 values are supported without changing cursor or decoder compatibility.
+Notifications only link `https:` URLs; any other explorer or app origin renders
+the `tx` label as inert text (see [docs/notification-links.md](docs/notification-links.md)).
 
 ## Cursor persistence
 

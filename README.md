@@ -134,6 +134,7 @@ looks healthy but notifies nobody.
 | `/resume` | Operator only. Schedules the next poll cycle immediately, without changing or replaying cursors |
 | `npm run cursor -- backup` | Backs up the validated cursor file without contacting Stellar or Telegram |
 | `npm run cursor -- restore --from PATH` | Restores a validated backup while holding the poller lock; replacing an existing cursor requires `--force` |
+| `npm run cursor -- check --archive PATH` | Read-only: compares the cursor with a scan archive and reports identity mismatches, ledger gaps and contradictions; exits non-zero on errors |
 
 `/start`, `/help`, and Telegram's command menu are generated from the same
 command metadata used to register handlers. Without `OPERATOR_TELEGRAM_USER_ID`,
@@ -214,6 +215,7 @@ npm run cursor -- backup
 npm run cursor -- backup --out /safe-storage/cursor-before-deploy.json
 npm run cursor -- restore --from /safe-storage/cursor-before-deploy.json --force
 npm run cursor -- history
+npm run cursor -- check --archive ./data/archive
 ```
 
 Restore validates and normalizes the backup to the current version-1 cursor
@@ -232,6 +234,39 @@ timestamp, reason, and before/after target positions (`cursor`,
 `lastEventLedger`, and optional `rewindFromLedger`) — never event payloads,
 event IDs, or secrets. Run `npm run cursor -- history` to inspect a summary of
 retained recovery entries without printing opaque cursor strings.
+
+### Cursor consistency check
+
+`npm run cursor -- check --archive PATH` compares `CURSOR_FILE` with a scan
+archive: an event archive directory (`events-*.jsonl`, as written by
+`createEventArchive`) or a single `npm run scan -- --jsonl` export file. It is
+strictly read-only — no instance lock, no temp files, and neither the cursor
+nor the archive is ever advanced, rewound, or rewritten — so it is safe to run
+next to a live poller. Comparisons are per target (`market`, `squad`) and at
+ledger granularity:
+
+| Finding | Severity | Meaning |
+| --- | --- | --- |
+| `archive-target-untracked` | warning | Archive has records for a target the cursor does not track |
+| `cursor-target-unarchived` | warning | Cursor has a position for a target the archive has no records for |
+| `mixed-contract-ids` | error | One target's records carry more than one contract id |
+| `contract-mismatch` | error | Records belong to a contract other than `--market-contract`/`--squad-contract` (default `MARKET_CONTRACT_ID`/`SQUAD_CONTRACT_ID`) |
+| `archive-behind-cursor` | error | Gap: the cursor processed events past the archive's last ledger |
+| `archive-beyond-cursor` | error | Contradiction: archived events lie past the cursor's resume position (skipped while a floor rewind is pending) |
+| `processed-events-missing` | error | Gap: event ids in the cursor's dedup window, inside the archived ledger span, are missing from the archive |
+| `cursor-ledger-contradiction` | error | The resume cursor sits behind the cursor's own `lastEventLedger` |
+| `event-ledger-mismatch` / `conflicting-duplicate` | error | A record's ledger contradicts its event id, or one event id was archived with different identities |
+| `malformed-record` | error | A record lacks a source, contract id, positive ledger, or event id |
+| `duplicate-event` / `out-of-order` | warning | Overlapping captures, or records stored out of chain order |
+| `rewind-pending` / `recorded-gap` | warning | A floor rewind is in progress, or `recoveryHistory` records ledgers lost to one |
+| `cursor-unreadable` / `cursor-unpositioned` | warning | No ledger can be read from the cursor, or the target has no position yet |
+
+The text report prints ledgers and counts only, never opaque cursor strings or
+event ids; `--json` prints the same report as JSON. Exit code `0` means no
+error findings (warnings allowed), `1` means at least one error finding or an
+unreadable cursor/archive. The cursor file does not record a network, so
+network identity is out of scope; point the check at the archive captured for
+the same deployment.
 
 Keep backups on persistent storage separate from the deployment's writable
 cursor when possible. On Railway, a one-off command must use the same attached

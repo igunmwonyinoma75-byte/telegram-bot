@@ -1,15 +1,22 @@
 /*
- * Offline cursor backup and restore command. It never contacts Stellar or
- * Telegram; restore uses the normal instance lock to exclude a running poller.
+ * Offline cursor backup, restore, history, and consistency-check command. It
+ * never contacts Stellar or Telegram; restore uses the normal instance lock to
+ * exclude a running poller. `history` and `check` are read-only.
  */
 
 import { randomUUID } from "node:crypto";
-import { access, link, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { pathToFileURL } from "node:url";
 
+import {
+  checkCursorConsistency,
+  formatCursorConsistencyReport,
+  type CursorConsistencyReport,
+} from "./cursor-consistency.js";
 import { acquireInstanceLock } from "./instanceLock.js";
+import { readArchive } from "./stellar/archive.js";
 import {
   appendCursorRecoveryHistory,
   parseAndMigrateCursorFile,
@@ -161,33 +168,107 @@ export async function readCursorRecoveryHistory(cursorFile: string): Promise<Cur
   return parsed.file.recoveryHistory ?? [];
 }
 
+/**
+ * Load scan-archive records without modifying them. A directory is read as an
+ * event archive (`events-*.jsonl`, see `createEventArchive`); a file is read as
+ * a `npm run scan -- --jsonl` export, skipping its `{ "type": "summary" }` line.
+ */
+export async function readScanArchiveRecords(archivePath: string): Promise<unknown[]> {
+  let info;
+  try {
+    info = await stat(archivePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`archive not found at ${archivePath}`);
+    }
+    throw err;
+  }
+
+  const records: unknown[] = [];
+  if (info.isDirectory()) {
+    for await (const event of readArchive(archivePath)) records.push(event);
+    return records;
+  }
+
+  const raw = await readFile(archivePath, "utf8");
+  const lines = raw.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index]!.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error(`malformed archive record at line ${index + 1}`);
+    }
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const { type, ...rest } = parsed as Record<string, unknown>;
+      if (type === "summary") continue;
+      records.push(type === undefined || type === "event" ? rest : parsed);
+      continue;
+    }
+    records.push(parsed);
+  }
+  return records;
+}
+
+export interface CheckCursorOptions {
+  cursorFile: string;
+  archivePath: string;
+  /** Contract id each source is expected to belong to (e.g. `{ market: MARKET_CONTRACT_ID }`). */
+  expectedContracts?: Record<string, string | undefined>;
+}
+
+/**
+ * Read-only consistency check of a cursor file against a scan archive. Takes
+ * no instance lock and writes nothing: neither the cursor nor the archive is
+ * modified, whatever the result.
+ */
+export async function checkCursor(options: CheckCursorOptions): Promise<CursorConsistencyReport> {
+  const raw = await readFile(options.cursorFile, "utf8");
+  const parsed = validateCursor(raw);
+  const records = await readScanArchiveRecords(options.archivePath);
+  return checkCursorConsistency(parsed.file, records, {
+    expectedContracts: options.expectedContracts,
+  });
+}
+
 interface CliOptions {
   file?: string;
   out?: string;
   from?: string;
+  archive?: string;
+  "market-contract"?: string;
+  "squad-contract"?: string;
   force: boolean;
+  json: boolean;
 }
 
+const VALUE_OPTIONS = ["--file", "--out", "--from", "--archive", "--market-contract", "--squad-contract"] as const;
+type ValueOption = (typeof VALUE_OPTIONS)[number];
+
 function parseOptions(args: string[]): CliOptions {
-  const options: CliOptions = { force: false };
+  const options: CliOptions = { force: false, json: false };
   const seen = new Set<string>();
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === "--force") {
-      if (seen.has(arg)) throw new Error("duplicate --force option");
+    if (arg === "--force" || arg === "--json") {
+      if (seen.has(arg)) throw new Error(`duplicate ${arg} option`);
       seen.add(arg);
-      options.force = true;
+      options[arg.slice(2) as "force" | "json"] = true;
       continue;
     }
-    if (arg !== "--file" && arg !== "--out" && arg !== "--from") {
+    if (!VALUE_OPTIONS.includes(arg as ValueOption)) {
       throw new Error(`unknown option: ${arg}`);
     }
-    if (seen.has(arg)) throw new Error(`duplicate ${arg} option`);
-    seen.add(arg);
+    if (seen.has(arg!)) throw new Error(`duplicate ${arg} option`);
+    seen.add(arg!);
     const value = args[index + 1];
-    if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a path`);
-    options[arg.slice(2) as "file" | "out" | "from"] = value;
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error(`${arg} requires ${arg!.endsWith("-contract") ? "a contract id" : "a path"}`);
+    }
+    options[arg!.slice(2) as Exclude<keyof CliOptions, "force" | "json">] = value;
     index += 1;
   }
 
@@ -245,14 +326,32 @@ export async function assertDifferentPaths(left: string, right: string): Promise
 async function main(): Promise<void> {
   loadDotenv({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
   const [action, ...args] = process.argv.slice(2);
-  if (action !== "backup" && action !== "restore" && action !== "history") {
+  if (action !== "backup" && action !== "restore" && action !== "history" && action !== "check") {
     throw new Error(
-      "usage: npm run cursor -- <backup|restore|history> [--file PATH] [--out PATH|--from PATH] [--force]",
+      "usage: npm run cursor -- <backup|restore|history|check> [--file PATH] [--out PATH|--from PATH] [--force] " +
+        "[--archive PATH [--json] [--market-contract ID] [--squad-contract ID]]",
     );
   }
 
   const options = parseOptions(args);
   const cursorFile = resolvePath(options.file ?? process.env.CURSOR_FILE ?? "./data/cursor.json");
+  if (action === "check") {
+    if (!options.archive) throw new Error("check requires --archive PATH");
+    const report = await checkCursor({
+      cursorFile,
+      archivePath: resolvePath(options.archive),
+      expectedContracts: {
+        market: options["market-contract"] ?? (process.env.MARKET_CONTRACT_ID || undefined),
+        squad: options["squad-contract"] ?? (process.env.SQUAD_CONTRACT_ID || undefined),
+      },
+    });
+    process.stdout.write(
+      options.json ? `${JSON.stringify(report, null, 2)}\n` : formatCursorConsistencyReport(report),
+    );
+    // Non-zero on any error finding so scripts can gate on it; nothing was written.
+    if (!report.consistent) process.exitCode = 1;
+    return;
+  }
   if (action === "history") {
     const history = await readCursorRecoveryHistory(cursorFile);
     console.log(`[cursor] recovery history (${history.length}) for ${cursorFile}`);

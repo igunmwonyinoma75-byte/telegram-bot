@@ -6,6 +6,23 @@ All notable changes to this project are documented here.
 
 ### Added
 
+**Read-only cursor consistency check against scan archives**
+
+- `npm run cursor -- check --archive PATH` compares the persisted cursor
+  (`CURSOR_FILE`) with an event archive directory or a `scan --jsonl` export
+  and reports target-identity mismatches (untracked targets, mixed or
+  unexpected contract ids), observed ledger-range gaps and contradictions
+  (archive ends before the cursor's last event, archived events past the
+  cursor's position, processed event ids missing from the archived span,
+  recorded floor-rewind gaps), and archive self-contradictions (event-id vs
+  ledger, conflicting/exact duplicates, out-of-order records). `--json` prints
+  the report as JSON; `--market-contract` / `--squad-contract` (or
+  `MARKET_CONTRACT_ID` / `SQUAD_CONTRACT_ID`) set the expected contract ids.
+- Strictly read-only: it takes no instance lock and never advances, rewinds or
+  writes a cursor or the archive. Exits `0` when no error finding is reported
+  (warnings allowed) and `1` otherwise. The pure report builder lives in
+  `src/cursor-consistency.ts`; `tests/cursor-consistency.test.mjs` covers it.
+
 **Selectable bot language**
 
 - `src/i18n.ts` now ships a message catalog per locale behind
